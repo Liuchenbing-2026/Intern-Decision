@@ -13,7 +13,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--model-path")
-    parser.add_argument("--backend", choices=("hf", "xtuner"), default="hf")
+    parser.add_argument("--backend", choices=("hf", "xtuner", "npu"), default="hf")
     parser.add_argument("--media-root", default="")
     parser.add_argument("--data", required=True)
     parser.add_argument("--output", required=True)

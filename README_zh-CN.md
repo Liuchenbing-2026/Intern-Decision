@@ -66,6 +66,10 @@ Intern-Decision 将状态、可选图片和多个结构化问题转换为决策�
   </tr>
 </table>
 
+## Ascend NPU 推理
+
+本分支增加独立 `npu` 后端：使用 Transformers 与 torch-npu，复用官方训练模板和解码规则，以 CANN 算子执行 Gated DeltaNet 预填充，并同步设备以准确计时。详见 [NPU 部署、验证与限制](docs/NPU.md)。
+
 ## 方法
 
 训练目标为**自回归掩码语言建模（autoregressive masked language modeling）**。

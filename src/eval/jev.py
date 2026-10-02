@@ -39,6 +39,16 @@ def verify_suite_counts(results):
             )
 
 
+def verify_distribution_count(metrics, data_path):
+    expected = sum(
+        len(_canonical_public(row)["questions"])
+        for row in read_rows(data_path)
+        if row.get("gold_probs") or row.get("provenance", {}).get("gold_probs")
+    )
+    if metrics["tvd_n"] != expected:
+        raise ValueError(f"Reference distribution count differs from dataset: expected {expected}")
+
+
 def source_hashes():
     return {str(path.relative_to(ROOT)): sha256(path) for path in sorted((ROOT / "src").rglob("*.py"))}
 
@@ -71,21 +81,32 @@ def _canonical_public(raw):
     }
 
 
-def evaluate(engine, data_path, output_path, worker=0, workers=1):
+def _predicted_rows(engine, data_path, worker, workers, batch_size):
+    from itertools import islice
+
+    selected = ((index, raw) for index, raw in enumerate(read_rows(data_path)) if index % workers == worker)
+    while batch := list(islice(selected, batch_size)):
+        rows = [_canonical_public(raw) for _, raw in batch]
+        results = engine.predict_batch(rows) if batch_size > 1 else [engine.predict(rows[0])]
+        if len(results) != len(batch):
+            raise ValueError("Prediction count differs from input batch")
+        yield from ((index, raw, result) for (index, raw), result in zip(batch, results))
+
+
+def evaluate(engine, data_path, output_path, worker=0, workers=1, batch_size=1):
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
     data_path, output_path = Path(data_path), Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     pairs, briers, tvds = [], [], []
     families = defaultdict(lambda: {"correct": 0, "total": 0})
     seen = set()
     predictions = []
-    for row_index, raw in enumerate(read_rows(data_path)):
-        if row_index % workers != worker:
-            continue
+    for row_index, raw, result in _predicted_rows(engine, data_path, worker, workers, batch_size):
         if not raw.get("id") or ("question" in raw and raw["id"] in seen):
             raise ValueError(f"Missing or duplicate evaluation identity: {raw.get('id')}")
         seen.add(raw["id"])
         row = _canonical_public(raw)
-        result = engine.predict(row)
         scores = {}
         for field, question in row["questions"].items():
             if "question" in raw:
@@ -148,6 +169,7 @@ def evaluate(engine, data_path, output_path, worker=0, workers=1):
         "checkpoint": engine.checkpoint,
         "objective_revision": "masked-next-token-v4",
         "inference_backend": getattr(engine, "backend_name", "xtuner"),
+        "batch_size": batch_size,
     }
     output_path.write_text("".join(json.dumps(p, ensure_ascii=False) + "\n" for p in predictions))
     Path(str(output_path) + ".metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
@@ -240,8 +262,8 @@ def merge_suite(
         Path(str(dest) + ".metrics.json").write_text(json.dumps(metrics, indent=2))
         results[name] = metrics
     verify_suite_counts(results)
-    if results["jevbench-hard"]["tvd_n"] != 10:
-        raise ValueError("Expected 10 hard gold_probs records")
+    for name, path, _ in suite_datasets(public_only, test_root):
+        verify_distribution_count(results[name], path)
     hashes = {p.name: sha256(p) for p in Path(checkpoint).glob("*") if p.is_file()}
     (output / "complete.json").write_text(
         json.dumps(
@@ -263,7 +285,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--model-path")
-    parser.add_argument("--backend", choices=("hf", "xtuner"), default="hf")
+    parser.add_argument("--backend", choices=("hf", "xtuner", "npu"), default="hf")
+    parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--calibration", help="Checkpoint-specific calibration.json; default is unscaled")
     parser.add_argument("--media-root", default="")
     parser.add_argument("--data")
@@ -277,6 +300,8 @@ def main():
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--merge", action="store_true")
     args = parser.parse_args()
+    if args.batch_size < 1:
+        parser.error("--batch-size must be positive")
     if not args.output:
         parser.error("--output is required; use a fresh directory")
     if not args.merge:
@@ -306,7 +331,7 @@ def main():
     if not args.suite:
         if not args.data or not args.output:
             parser.error("--data and --output are required without --suite")
-        evaluate(engine, args.data, args.output)
+        evaluate(engine, args.data, args.output, batch_size=args.batch_size)
         return
     output = Path(args.output or Path(args.checkpoint) / "evaluations").resolve()
     datasets = suite_datasets(args.public_only, args.test_root)
@@ -314,14 +339,16 @@ def main():
         output = output / f"worker-{args.worker}"
     results = {}
     for name, path, count in datasets:
-        results[name] = evaluate(engine, path, output / f"{name}.predictions.jsonl", args.worker, args.workers)
+        results[name] = evaluate(
+            engine, path, output / f"{name}.predictions.jsonl", args.worker, args.workers, args.batch_size
+        )
         if args.workers == 1 and count and results[name]["rows"] != count:
             raise ValueError(f"{name}: expected {count} records")
     if args.workers > 1:
         return
     verify_suite_counts(results)
-    if results["jevbench-hard"]["tvd_n"] != 10:
-        raise ValueError("Expected 10 hard gold_probs records")
+    for name, path, _ in datasets:
+        verify_distribution_count(results[name], path)
     hashes = {p.name: sha256(p) for p in Path(args.checkpoint).glob("*") if p.is_file()}
     (output / "complete.json").write_text(
         json.dumps(

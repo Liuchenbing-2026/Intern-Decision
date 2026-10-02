@@ -69,6 +69,10 @@ support your own records. Demo examples are synthetic interface illustrations.
   </tr>
 </table>
 
+## Ascend NPU inference
+
+This fork adds a standalone `npu` backend using Transformers and torch-npu. It reuses the trained templates and decoding rules, replaces the Gated DeltaNet prefill recurrence with the CANN operator, and synchronizes NPU timing. See [NPU setup, validation and limitations](docs/NPU.md).
+
 ## Method
 
 The objective is `autoregressive masked language modeling`. The assistant input contains a complete

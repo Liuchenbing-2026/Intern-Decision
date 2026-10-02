@@ -26,7 +26,7 @@ class ThinkingConfig(BaseModel):
 
 class InferenceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    backend: Literal["hf", "xtuner"] = "hf"
+    backend: Literal["hf", "xtuner", "npu"] = "hf"
     checkpoint: str
     processor_path: str | None = None
     media_root: str = ""

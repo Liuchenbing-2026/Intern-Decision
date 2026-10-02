@@ -25,12 +25,16 @@ class DecisionEngine:
             from src.inference.hf_backend import HFBackend
 
             backend_class = HFBackend
+        elif backend == "npu":
+            from src.inference.npu_backend import NPUBackend
+
+            backend_class = NPUBackend
         elif backend == "xtuner":
             from src.inference.xtuner_backend import XTunerBackend
 
             backend_class = XTunerBackend
         else:
-            raise ValueError("backend must be hf or xtuner")
+            raise ValueError("backend must be hf, xtuner or npu")
         self.checkpoint = str(Path(checkpoint).resolve())
         self.temperature = load_calibration(calibration_path, checkpoint) if calibration_path else 1.0
         self.calibration_path = str(Path(calibration_path).resolve()) if calibration_path else None
@@ -53,7 +57,19 @@ class DecisionEngine:
         )
 
     def predict(self, row):
-        compiled, logits, length, inference_ms = self.backend.score(row)
+        return self._decode(row, *self.backend.score(row))
+
+    def predict_batch(self, rows):
+        if not rows:
+            return []
+        if len(rows) == 1 or not hasattr(self.backend, "score_batch"):
+            return [self.predict(row) for row in rows]
+        scored = self.backend.score_batch(rows)
+        if len(scored) != len(rows):
+            raise ValueError("Backend batch size does not match requests")
+        return [self._decode(row, *score) for row, score in zip(rows, scored)]
+
+    def _decode(self, row, compiled, logits, length, inference_ms):
         answers = {}
         for index, field in enumerate(compiled.fields):
             question = row["questions"][field]

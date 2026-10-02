@@ -13,6 +13,41 @@ from src.eval.use_temperature import bind
 from src.eval.verify_bundle import ROOT, digest, verify
 
 
+def test_distribution_guard_uses_released_records_and_rejects_missing_scores(tmp_path):
+    from src.eval.jev import verify_distribution_count
+
+    released = ROOT / "accuracy-v1/jevbench/hard.jsonl"
+    verify_distribution_count({"tvd_n": 0}, released)
+    custom = tmp_path / "distribution.jsonl"
+    custom.write_text(json.dumps({"question": {}, "state": "x", "id": "x", "gold_probs": {"A": 1.0}}) + "\n")
+    verify_distribution_count({"tvd_n": 1}, custom)
+    with pytest.raises(ValueError, match="Reference distribution count"):
+        verify_distribution_count({"tvd_n": 0}, custom)
+
+
+def test_batched_scoring_preserves_shard_identity_and_partial_tail(tmp_path):
+    from src.eval.jev import evaluate
+    from src.service.examples import examples
+
+    row = examples()[0] | {"targets": {"box": {"label": "left"}}}
+    data = tmp_path / "records.jsonl"
+    data.write_text("".join(json.dumps(row | {"id": str(index)}) + "\n" for index in range(5)))
+    batch_lengths = []
+
+    def predict_batch(rows):
+        batch_lengths.append(len(rows))
+        return [{"answers": {"box": {"probabilities": {"left": 0.8, "right": 0.2}}}} for _ in rows]
+
+    engine = SimpleNamespace(checkpoint="synthetic", temperature=1.0, backend_name="npu", predict_batch=predict_batch)
+    whole = evaluate(engine, data, tmp_path / "whole.jsonl", batch_size=2)
+    assert (whole["rows"], whole["correct"]) == (5, 5)
+    assert batch_lengths == [2, 2, 1]
+    shard = evaluate(engine, data, tmp_path / "shard.jsonl", worker=1, workers=2, batch_size=3)
+    assert (shard["rows"], shard["correct"]) == (2, 2)
+    saved = [json.loads(line) for line in (tmp_path / "shard.jsonl").read_text().splitlines()]
+    assert [(item["id"], item["source_line"]) for item in saved] == [("1", 2), ("3", 4)]
+
+
 def test_accuracy_bundle_and_tamper_rejection(tmp_path):
     assert verify(ROOT / "accuracy-v1")["rows"] == 10751
     (tmp_path / "x.jsonl").write_text("{}\n")

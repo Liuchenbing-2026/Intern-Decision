@@ -85,15 +85,53 @@ class HFBackend:
             raise ValueError("Decision marker count or position mismatch")
         return compiled, batch, positions
 
+    def synchronize(self):
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+
     @torch.inference_mode()
     def score(self, row):
         compiled, batch, positions = self.encode(row)
-        if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
+        self.synchronize()
         start = time.perf_counter()
         batch = batch.to(self.device)
         # Native HF slices hidden states before the LM head, avoiding L x V logits.
         output = self.model(**batch, use_cache=False, logits_to_keep=positions.to(self.device)).logits[0]
-        if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
+        self.synchronize()
         return compiled, output, batch["input_ids"].shape[-1], (time.perf_counter() - start) * 1000
+
+    @torch.inference_mode()
+    def score_batch(self, rows):
+        if not rows:
+            return []
+        # The image path retains the processor's exact per-image metadata.
+        if len(rows) == 1 or any(row.get("images") for row in rows):
+            return [self.score(row) for row in rows]
+        encoded = [self.encode(row) for row in rows]
+        lengths = [batch["input_ids"].shape[-1] for _, batch, _ in encoded]
+        width = max(lengths)
+        ids = torch.full((len(rows), width), self.tokenizer.pad_token_id, dtype=torch.long)
+        mask = torch.zeros_like(ids)
+        for index, (_, batch, _) in enumerate(encoded):
+            ids[index, : lengths[index]] = batch["input_ids"][0]
+            mask[index, : lengths[index]] = 1
+        # Compute only the union of decision positions, then restore each row's
+        # field order. Padding is on the right and never counted in usage.
+        positions = torch.cat([positions for _, _, positions in encoded]).unique(sorted=True)
+        self.synchronize()
+        start = time.perf_counter()
+        logits = self.model(
+            input_ids=ids.to(self.device),
+            attention_mask=mask.to(self.device),
+            use_cache=False,
+            logits_to_keep=positions.to(self.device),
+        ).logits
+        outputs = [
+            logits[index, torch.searchsorted(positions, row_positions).to(self.device)]
+            for index, (_, _, row_positions) in enumerate(encoded)
+        ]
+        self.synchronize()
+        elapsed = (time.perf_counter() - start) * 1000
+        return [
+            (compiled, output, length, elapsed) for (compiled, _, _), output, length in zip(encoded, outputs, lengths)
+        ]

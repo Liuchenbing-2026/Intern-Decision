@@ -11,7 +11,7 @@ from src.inference.engine import DecisionEngine
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/inference/default.json")
-    parser.add_argument("--backend", choices=("hf", "xtuner"))
+    parser.add_argument("--backend", choices=("hf", "xtuner", "npu"))
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
